@@ -282,20 +282,19 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
         return {"error": "Video generation timed out or URL not found"}
 
 def run_job(job_id, prompt, model, aspect):
-    """Background job: find proxy → generate video. Retries with up to 5 proxies + direct."""
+    """Background job: generate video. Grabs proxies from pool, retries on failure."""
     with jobs_lock:
         if job_id in jobs:
             jobs[job_id]['status'] = 'processing'
             jobs[job_id]['progress'] = 'Finding working proxy...'
     save_jobs()
 
-    # Collect proxies to try
+    # Grab available proxies from pool (fast, no scanning)
     proxies_to_try = []
-    for _ in range(5):
-        px = find_clean_proxy()
-        if px and px not in proxies_to_try:
-            proxies_to_try.append(px)
-    # Also try direct as last resort
+    with proxy_pool_lock:
+        while proxy_pool and len(proxies_to_try) < 5:
+            proxies_to_try.append(proxy_pool.popleft())
+    # Always try direct as last resort
     proxies_to_try.append(None)
 
     result = None
