@@ -1,0 +1,47 @@
+API Endpoints - Video Generation Server
+========================================
+
+GET /
+  Health check. Returns list of available endpoints.
+
+GET /api/status
+  Server status + job counts by status.
+  Response: { "status": "ok", "jobs": {"completed": 2, "processing": 1}, "total": 3 }
+
+POST /api/generate
+  Start video generation (async).
+  Body: { "prompt": "A cat playing piano", "model": "3.1", "aspect": "portrait" }
+  - prompt (required): 15+ chars, the video description
+  - model: "3.1" = Grok 4, "2.0" = Grok 4.5 (default: "3.1")
+  - aspect: "portrait" or "landscape" (default: "portrait")
+  Response: { "jobId": "vid-123456", "status": "queued" }
+  Then poll /api/job/<id> for result.
+
+GET /api/job/<job_id>
+  Check job status.
+  Response: {
+    "id": "vid-123456",
+    "status": "queued|processing|completed|failed",
+    "progress": "Generating with proxy 1.2.3.4:8080...",
+    "prompt": "...",
+    "videoUrl": "https://veoaifree.com/video/uploads/video_xxx.mp4",
+    "error": null
+  }
+
+GET /api/jobs
+  List all jobs (newest first, max 50).
+  Response: { "total": 5, "jobs": [...] }
+
+GET /api/proxy/find
+  Find a clean proxy on demand.
+  Response: { "proxy": "1.2.3.4:8080", "status": "clean" }
+
+POST /api/quick-generate
+  Synchronous generation (blocks up to 5 min).
+  Body: same as /api/generate
+  Response: { "videoUrl": "...", "contentType": "video/mp4", "contentLength": "3904328" }
+  Or error: { "error": "Rate limited on this proxy" }
+
+MCP Endpoints:
+  GET  /api/mcp/sse          - SSE stream for MCP protocol
+  POST /api/mcp/messages     - MCP JSON-RPC messages
