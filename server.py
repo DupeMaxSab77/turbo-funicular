@@ -126,12 +126,25 @@ def _batch_playwright_test(proxies, max_clean=3):
     return clean
 
 def find_clean_proxy():
-    """Get a clean proxy from the pool. Falls back to fresh scan."""
+    """Get a clean proxy. Validates with Playwright before returning."""
+    candidates = []
     with proxy_pool_lock:
-        if proxy_pool:
-            proxy = proxy_pool.popleft()
-            print(f"[proxy] Pool hit: {proxy} ({len(proxy_pool)} remaining)", flush=True)
-            return proxy
+        while proxy_pool and len(candidates) < 10:
+            candidates.append(proxy_pool.popleft())
+
+    if candidates:
+        clean = _batch_playwright_test(candidates, max_clean=1)
+        if clean:
+            # Put back untested ones
+            with proxy_pool_lock:
+                for px in candidates:
+                    if px not in clean and px not in proxy_pool:
+                        proxy_pool.append(px)
+            return clean[0]
+        # None passed Playwright, return None
+        return None
+
+    # Pool empty — do a full scan
     print("[proxy] Pool empty, scanning...", flush=True)
     return _scan_for_proxy()
 
@@ -149,34 +162,27 @@ def _scan_for_proxy():
     return clean[0] if clean else None
 
 def proxy_refresh_loop():
-    """Background thread: finds clean proxies every 30s and fills the pool."""
+    """Background thread: HTTP-tests proxies every 30s, fills pool.
+    Playwright validation happens on-demand in find_clean_proxy."""
     print("[proxy-refresh] Starting auto-refresh loop (every 30s)", flush=True)
     while True:
         try:
             all_proxies = fetch_proxies()
             random.shuffle(all_proxies)
 
-            # Skip already tested dead proxies
             new_proxies = [p for p in all_proxies if p not in tested_proxies]
+            alive = _fast_http_filter(new_proxies, limit=300, workers=40, timeout_s=12)
 
-            alive = _fast_http_filter(new_proxies, limit=500, workers=60, timeout_s=15)
-
-            # Mark tested proxies (alive or dead)
-            for p in new_proxies[:500]:
+            for p in new_proxies[:300]:
                 tested_proxies.add(p)
 
-            clean = []
-            if alive:
-                clean = _batch_playwright_test(alive[:20], max_clean=5)
-
             with proxy_pool_lock:
-                for px in clean:
+                for px in alive:
                     if px not in proxy_pool:
                         proxy_pool.append(px)
 
-            print(f"[proxy-refresh] Pool: {len(proxy_pool)} proxies (found {len(clean)} this cycle, {len(alive)} alive)", flush=True)
+            print(f"[proxy-refresh] Pool: {len(proxy_pool)} proxies ({len(alive)} alive this cycle)", flush=True)
 
-            # Reset tested set periodically to re-check old proxies
             if len(tested_proxies) > 3000:
                 tested_proxies.clear()
 
