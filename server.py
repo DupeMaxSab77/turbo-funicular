@@ -300,51 +300,58 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             except: pass
 
 def run_job(job_id, prompt, model, aspect):
-    """Background job: generate video. Grabs proxies from pool, retries on failure."""
+    """Background job: generate video. Tries direct first, then proxies as fallback."""
     with jobs_lock:
         if job_id in jobs:
             jobs[job_id]['status'] = 'processing'
-            jobs[job_id]['progress'] = 'Finding working proxy...'
+            jobs[job_id]['progress'] = 'Generating...'
     save_jobs()
 
-    # Grab available proxies from pool (fast, no scanning)
+    # Try direct first (fastest, works on first 2 videos per IP)
+    result = generate_video(prompt, model, aspect, None)
+    if 'error' not in result:
+        _finish_job(job_id, result)
+        return
+
+    print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
+
+    # Fallback: try proxies from pool
     proxies_to_try = []
     with proxy_pool_lock:
-        while proxy_pool and len(proxies_to_try) < 5:
+        while proxy_pool and len(proxies_to_try) < 3:
             proxies_to_try.append(proxy_pool.popleft())
-    # Always try direct as last resort
-    proxies_to_try.append(None)
 
-    result = None
     for i, proxy in enumerate(proxies_to_try):
-        label = proxy or "direct"
         with jobs_lock:
             if job_id in jobs:
-                jobs[job_id]['progress'] = f'Try {i+1}/{len(proxies_to_try)}: {label}'
+                jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {proxy}'
         save_jobs()
 
-        print(f"[Job] {job_id} try {i+1}: {label}", flush=True)
+        print(f"[Job] {job_id} proxy try {i+1}: {proxy}", flush=True)
         result = generate_video(prompt, model, aspect, proxy)
 
         if 'error' not in result:
-            break
+            _finish_job(job_id, result)
+            return
 
-        print(f"[Job] {job_id} failed: {result['error']}", flush=True)
+        print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
 
+    # All failed
     with jobs_lock:
         if job_id in jobs:
-            if result and 'error' not in result:
-                jobs[job_id]['status'] = 'completed'
-                jobs[job_id]['progress'] = 'Completed'
-                jobs[job_id]['videoUrl'] = result['videoUrl']
-                if 'contentType' in result:
-                    jobs[job_id]['contentType'] = result['contentType']
-                if 'contentLength' in result:
-                    jobs[job_id]['contentLength'] = result['contentLength']
-            else:
-                jobs[job_id]['status'] = 'failed'
-                jobs[job_id]['error'] = result.get('error', 'Unknown error') if result else 'No proxy worked'
-                jobs[job_id]['progress'] = 'Failed'
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['error'] = result.get('error', 'All attempts failed') if result else 'All attempts failed'
+            jobs[job_id]['progress'] = 'Failed'
+    save_jobs()
+
+def _finish_job(job_id, result):
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]['status'] = 'completed'
+            jobs[job_id]['progress'] = 'Completed'
+            jobs[job_id]['videoUrl'] = result['videoUrl']
+            if 'contentType' in result: jobs[job_id]['contentType'] = result['contentType']
+            if 'contentLength' in result: jobs[job_id]['contentLength'] = result['contentLength']
     save_jobs()
 
 # ============================================================
