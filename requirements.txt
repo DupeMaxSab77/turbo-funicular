@@ -1,0 +1,6 @@
+Flask==3.0.3
+Flask-Cors==4.0.1
+playwright==1.44.0
+pyngrok==7.1.6
+requests==2.31.0
+Pillow==10.3.0
