@@ -16,7 +16,7 @@ try:
                         os.environ[_key] = _val
 except: pass
 
-import time, uuid, threading, requests, json, re, random, queue
+import time, uuid, threading, requests, json, re, random, queue, collections
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, Response
@@ -38,6 +38,10 @@ os.makedirs(UPLOADS_DIR, exist_ok=True)
 jobs = {}
 jobs_lock = threading.Lock()
 _last_save = [0.0]
+
+# --- Proxy cache (auto-refreshed every 30s) ---
+proxy_pool = collections.deque(maxlen=20)
+proxy_pool_lock = threading.Lock()
 
 # --- Constants ---
 URL = "https://veoaifree.com/grok-ai-video-generator/"
@@ -99,7 +103,22 @@ def playwright_test(proxy):
     return None
 
 def find_clean_proxy():
-    """3-phase proxy finder. Returns a proxy that's alive and not rate-limited."""
+    """Get a clean proxy from the auto-refreshed pool. Falls back to fresh scan."""
+    # Try pool first
+    with proxy_pool_lock:
+        if proxy_pool:
+            proxy = proxy_pool.popleft()
+            print(f"[proxy] Pool hit: {proxy} ({len(proxy_pool)} remaining)", flush=True)
+            return proxy
+
+    # Pool empty — do a fresh scan
+    print("[proxy] Pool empty, scanning...", flush=True)
+    proxy = _scan_for_proxy()
+    return proxy
+
+
+def _scan_for_proxy():
+    """3-phase proxy scan. Returns one clean proxy or None."""
     print("[proxy] Phase 1: HTTP filter...", flush=True)
     all_proxies = fetch_proxies()
     random.shuffle(all_proxies)
@@ -128,10 +147,55 @@ def find_clean_proxy():
                     if r:
                         clean.append(r)
                         print(f"[proxy] CLEAN: {r}", flush=True)
-                        break  # got one, good enough
+                        break
                 except: pass
         except: pass
     return clean[0] if clean else None
+
+
+def proxy_refresh_loop():
+    """Background thread: finds clean proxies every 30s and fills the pool."""
+    print("[proxy-refresh] Starting auto-refresh loop (every 30s)", flush=True)
+    while True:
+        try:
+            # Find up to 5 clean proxies
+            all_proxies = fetch_proxies()
+            random.shuffle(all_proxies)
+            alive = []
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                futs = {ex.submit(http_test, p): p for p in all_proxies[:300]}
+                try:
+                    for f in as_completed(futs, timeout=20):
+                        try:
+                            r = f.result()
+                            if r: alive.append(r)
+                        except: pass
+                except: pass
+
+            clean = []
+            if alive:
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    futs = {ex.submit(playwright_test, p): p for p in alive[:15]}
+                    try:
+                        for f in as_completed(futs, timeout=45):
+                            try:
+                                r = f.result()
+                                if r:
+                                    clean.append(r)
+                                    if len(clean) >= 5: break
+                            except: pass
+                    except: pass
+
+            with proxy_pool_lock:
+                for px in clean:
+                    if px not in proxy_pool:
+                        proxy_pool.append(px)
+
+            print(f"[proxy-refresh] Pool: {len(proxy_pool)} clean proxies", flush=True)
+        except Exception as e:
+            print(f"[proxy-refresh] Error: {e}", flush=True)
+
+        time.sleep(30)
 
 # ============================================================
 #  VIDEO GENERATION
@@ -484,6 +548,9 @@ def mcp_messages():
 # ============================================================
 
 load_jobs()
+
+# Start proxy auto-refresh
+threading.Thread(target=proxy_refresh_loop, daemon=True).start()
 
 if __name__ == '__main__':
     print(f"Server on http://0.0.0.0:{PORT}", flush=True)
