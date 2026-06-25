@@ -244,10 +244,16 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
 
         pg.locator('#generate_it').click(force=True, timeout=5000)
 
-        t0 = time.time(); last_p = -1; p100 = None
-        while time.time() - t0 < 300:
+        t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
+        while time.time() - t0 < 120:
             e = int(time.time() - t0)
             if vid[0]: break
+            # Early abort: no progress after 40s
+            if e > 40 and last_p == -1:
+                break
+            # Early abort: stuck at same percentage for 30s
+            if p100 is None and last_p > 0 and (time.time() - last_change) > 30:
+                break
             if e % 15 == 0:
                 b2 = pg.evaluate("()=>document.body?.innerText||''")
                 if 'rate limit' in b2.lower() or 'limit reached' in b2.lower():
@@ -256,6 +262,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 pi = pg.evaluate("()=>{const el=document.querySelector('.show-percentage');if(el){const m=(el.textContent||'').match(/(\\d{1,3})\\s*%/);if(m)return parseInt(m[1]);}return null;}")
                 if pi is not None and pi != last_p:
                     last_p = pi
+                    last_change = time.time()
                     if pi >= 100 and not p100: p100 = time.time()
             except: pass
             if p100 and e % 3 == 0:
