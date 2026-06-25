@@ -83,7 +83,7 @@ def http_test(proxy):
     except: pass
     return None
 
-def _fast_http_filter(proxies, limit=200, workers=50, timeout_s=10):
+def _fast_http_filter(proxies, limit=150, workers=30, timeout_s=10):
     """Fast parallel HTTP test. Returns list of alive proxies."""
     alive = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -96,7 +96,7 @@ def _fast_http_filter(proxies, limit=200, workers=50, timeout_s=10):
             except: pass
     return alive
 
-def _batch_playwright_test(proxies, max_clean=5):
+def _batch_playwright_test(proxies, max_clean=3):
     """Test proxies using ONE shared Playwright browser. Returns clean proxies."""
     clean = []
     if not proxies: return clean
@@ -154,7 +154,7 @@ def proxy_refresh_loop():
         try:
             all_proxies = fetch_proxies()
             random.shuffle(all_proxies)
-            alive = _fast_http_filter(all_proxies, limit=200, workers=50, timeout_s=10)
+            alive = _fast_http_filter(all_proxies, limit=150, workers=30, timeout_s=10)
 
             clean = []
             if alive:
