@@ -74,124 +74,98 @@ def fetch_proxies():
     return list(pxs)
 
 def http_test(proxy):
+    """Quick HTTP reachability test. Returns proxy if alive, else None."""
     try:
         r = requests.get("https://veoaifree.com/",
                          proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
-                         timeout=2, headers={'User-Agent': 'Mozilla/5.0'})
+                         timeout=2, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'})
         if r.status_code == 200: return proxy
     except: pass
     return None
 
-def playwright_test(proxy):
+def _fast_http_filter(proxies, limit=200, workers=50, timeout_s=10):
+    """Fast parallel HTTP test. Returns list of alive proxies."""
+    alive = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(http_test, p): p for p in proxies[:limit]}
+        done, _ = concurrent.futures.wait(futs, timeout=timeout_s)
+        for f in done:
+            try:
+                r = f.result()
+                if r: alive.append(r)
+            except: pass
+    return alive
+
+def _batch_playwright_test(proxies, max_clean=5):
+    """Test proxies using ONE shared Playwright browser. Returns clean proxies."""
+    clean = []
+    if not proxies: return clean
     try:
         with sync_playwright() as p:
-            br = p.chromium.launch(headless=True, proxy={"server": f"http://{proxy}"},
-                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
-            ctx = br.new_context(viewport={'width': 1280, 'height': 720}, locale='en-US',
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-            pg = ctx.new_page()
-            try:
-                pg.goto(URL, timeout=8000, wait_until='domcontentloaded')
-                body = pg.evaluate("()=>document.body?.innerText||''")
-                br.close()
-                if 'rate limit' in body.lower() or 'limit reached' in body.lower(): return None
-                if len(body) > 500: return proxy
-            except:
-                try: br.close()
+            br = p.chromium.launch(headless=True, args=[
+                '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
+            for px in proxies:
+                ctx = br.new_context(proxy={"server": f"http://{px}"},
+                    viewport={'width': 1280, 'height': 720}, locale='en-US',
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
+                pg = ctx.new_page()
+                try:
+                    pg.goto(URL, timeout=7000, wait_until='domcontentloaded')
+                    body = pg.evaluate("()=>document.body?.innerText||''")
+                    if 'rate limit' not in body.lower() and 'limit reached' not in body.lower() and len(body) > 500:
+                        clean.append(px)
+                        print(f"[proxy] CLEAN: {px}", flush=True)
+                        if len(clean) >= max_clean: break
                 except: pass
-    except: pass
-    return None
+                try: ctx.close()
+                except: pass
+            br.close()
+    except Exception as e:
+        print(f"[proxy] Playwright batch error: {e}", flush=True)
+    return clean
 
 def find_clean_proxy():
-    """Get a clean proxy from the auto-refreshed pool. Falls back to fresh scan."""
-    # Try pool first
+    """Get a clean proxy from the pool. Falls back to fresh scan."""
     with proxy_pool_lock:
         if proxy_pool:
             proxy = proxy_pool.popleft()
             print(f"[proxy] Pool hit: {proxy} ({len(proxy_pool)} remaining)", flush=True)
             return proxy
-
-    # Pool empty — do a fresh scan
     print("[proxy] Pool empty, scanning...", flush=True)
-    proxy = _scan_for_proxy()
-    return proxy
-
+    return _scan_for_proxy()
 
 def _scan_for_proxy():
-    """3-phase proxy scan. Returns one clean proxy or None."""
-    print("[proxy] Phase 1: HTTP filter...", flush=True)
+    """Fast scan: HTTP filter → shared Playwright test. Returns one clean proxy or None."""
+    print("[proxy] HTTP filtering...", flush=True)
     all_proxies = fetch_proxies()
     random.shuffle(all_proxies)
-    alive = []
-    with ThreadPoolExecutor(max_workers=20) as ex:
-        futs = {ex.submit(http_test, p): p for p in all_proxies[:300]}
-        try:
-            for f in as_completed(futs, timeout=20):
-                try:
-                    r = f.result()
-                    if r: alive.append(r)
-                except: pass
-        except: pass
+    alive = _fast_http_filter(all_proxies, limit=200, workers=50, timeout_s=10)
     print(f"[proxy] {len(alive)} alive", flush=True)
-
     if not alive: return None
 
-    print("[proxy] Phase 2: Playwright filter...", flush=True)
-    clean = []
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futs = {ex.submit(playwright_test, p): p for p in alive[:20]}
-        try:
-            for f in as_completed(futs, timeout=60):
-                try:
-                    r = f.result()
-                    if r:
-                        clean.append(r)
-                        print(f"[proxy] CLEAN: {r}", flush=True)
-                        break
-                except: pass
-        except: pass
+    print("[proxy] Playwright testing...", flush=True)
+    clean = _batch_playwright_test(alive[:15])
     return clean[0] if clean else None
-
 
 def proxy_refresh_loop():
     """Background thread: finds clean proxies every 30s and fills the pool."""
     print("[proxy-refresh] Starting auto-refresh loop (every 30s)", flush=True)
     while True:
         try:
-            # Find up to 5 clean proxies
             all_proxies = fetch_proxies()
             random.shuffle(all_proxies)
-            alive = []
-            with ThreadPoolExecutor(max_workers=20) as ex:
-                futs = {ex.submit(http_test, p): p for p in all_proxies[:300]}
-                try:
-                    for f in as_completed(futs, timeout=20):
-                        try:
-                            r = f.result()
-                            if r: alive.append(r)
-                        except: pass
-                except: pass
+            alive = _fast_http_filter(all_proxies, limit=200, workers=50, timeout_s=10)
 
             clean = []
             if alive:
-                with ThreadPoolExecutor(max_workers=2) as ex:
-                    futs = {ex.submit(playwright_test, p): p for p in alive[:15]}
-                    try:
-                        for f in as_completed(futs, timeout=45):
-                            try:
-                                r = f.result()
-                                if r:
-                                    clean.append(r)
-                                    if len(clean) >= 5: break
-                            except: pass
-                    except: pass
+                clean = _batch_playwright_test(alive[:15], max_clean=5)
 
             with proxy_pool_lock:
                 for px in clean:
                     if px not in proxy_pool:
                         proxy_pool.append(px)
 
-            print(f"[proxy-refresh] Pool: {len(proxy_pool)} clean proxies", flush=True)
+            print(f"[proxy-refresh] Pool: {len(proxy_pool)} proxies (found {len(clean)} this cycle)", flush=True)
         except Exception as e:
             print(f"[proxy-refresh] Error: {e}", flush=True)
 
