@@ -282,48 +282,41 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
         return {"error": "Video generation timed out or URL not found"}
 
 def run_job(job_id, prompt, model, aspect):
-    """Background job: find proxy → generate video."""
+    """Background job: find proxy → generate video. Retries with up to 5 proxies + direct."""
     with jobs_lock:
         if job_id in jobs:
             jobs[job_id]['status'] = 'processing'
             jobs[job_id]['progress'] = 'Finding working proxy...'
     save_jobs()
 
-    proxy = find_clean_proxy()
-    if not proxy:
+    # Collect proxies to try
+    proxies_to_try = []
+    for _ in range(5):
+        px = find_clean_proxy()
+        if px and px not in proxies_to_try:
+            proxies_to_try.append(px)
+    # Also try direct as last resort
+    proxies_to_try.append(None)
+
+    result = None
+    for i, proxy in enumerate(proxies_to_try):
+        label = proxy or "direct"
         with jobs_lock:
             if job_id in jobs:
-                jobs[job_id]['status'] = 'failed'
-                jobs[job_id]['error'] = 'No working proxy found'
-                jobs[job_id]['progress'] = 'Failed'
+                jobs[job_id]['progress'] = f'Try {i+1}/{len(proxies_to_try)}: {label}'
         save_jobs()
-        return
+
+        print(f"[Job] {job_id} try {i+1}: {label}", flush=True)
+        result = generate_video(prompt, model, aspect, proxy)
+
+        if 'error' not in result:
+            break
+
+        print(f"[Job] {job_id} failed: {result['error']}", flush=True)
 
     with jobs_lock:
         if job_id in jobs:
-            jobs[job_id]['progress'] = f'Generating with proxy {proxy}...'
-    save_jobs()
-
-    result = generate_video(prompt, model, aspect, proxy)
-
-    with jobs_lock:
-        if job_id in jobs:
-            if 'error' in result:
-                # Retry with different proxy
-                print(f"[Job] Failed with {proxy}, retrying...", flush=True)
-                proxy2 = find_clean_proxy()
-                if proxy2 and proxy2 != proxy:
-                    with jobs_lock:
-                        if job_id in jobs:
-                            jobs[job_id]['progress'] = f'Retry with proxy {proxy2}...'
-                    save_jobs()
-                    result = generate_video(prompt, model, aspect, proxy2)
-
-            if 'error' in result:
-                jobs[job_id]['status'] = 'failed'
-                jobs[job_id]['error'] = result['error']
-                jobs[job_id]['progress'] = 'Failed'
-            else:
+            if result and 'error' not in result:
                 jobs[job_id]['status'] = 'completed'
                 jobs[job_id]['progress'] = 'Completed'
                 jobs[job_id]['videoUrl'] = result['videoUrl']
@@ -331,6 +324,10 @@ def run_job(job_id, prompt, model, aspect):
                     jobs[job_id]['contentType'] = result['contentType']
                 if 'contentLength' in result:
                     jobs[job_id]['contentLength'] = result['contentLength']
+            else:
+                jobs[job_id]['status'] = 'failed'
+                jobs[job_id]['error'] = result.get('error', 'Unknown error') if result else 'No proxy worked'
+                jobs[job_id]['progress'] = 'Failed'
     save_jobs()
 
 # ============================================================
