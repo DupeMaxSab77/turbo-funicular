@@ -45,7 +45,14 @@ proxy_pool_lock = threading.Lock()
 tested_proxies = set()  # avoid retesting dead proxies
 
 # --- Constants ---
-URL = "https://veoaifree.com/grok-ai-video-generator/"
+URLS = {
+    "grok": "https://veoaifree.com/grok-ai-video-generator/",
+    "seedance": "https://veoaifree.com/seedance-2-0-video-generator-free/",
+}
+MODELS = {
+    "grok": {"3.1": "Grok 4", "2.0": "Grok 4.5"},
+    "seedance": {"2.0": "Seedance 2.0", "1.5": "Seedance"},
+}
 AD = ["clickiocdn", "google-analytics", "googletagmanager", "doubleclick",
       "facebook", "hotjar", "clarity", "adnxs", "taboola", "outbrain"]
 
@@ -101,6 +108,7 @@ def _batch_playwright_test(proxies, max_clean=3):
     """Test proxies using ONE shared Playwright browser. Returns clean proxies."""
     clean = []
     if not proxies: return clean
+    test_url = URLS["grok"]  # Use grok page for proxy testing
     try:
         with sync_playwright() as p:
             br = p.chromium.launch(headless=True, args=[
@@ -111,7 +119,7 @@ def _batch_playwright_test(proxies, max_clean=3):
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
                 pg = ctx.new_page()
                 try:
-                    pg.goto(URL, timeout=7000, wait_until='domcontentloaded')
+                    pg.goto(test_url, timeout=7000, wait_until='domcontentloaded')
                     body = pg.evaluate("()=>document.body?.innerText||''")
                     if 'rate limit' not in body.lower() and 'limit reached' not in body.lower() and len(body) > 500:
                         clean.append(px)
@@ -195,8 +203,9 @@ def proxy_refresh_loop():
 #  VIDEO GENERATION
 # ============================================================
 
-def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", proxy=None):
+def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", proxy=None, generator="grok"):
     """Generate video. Returns dict with videoUrl or error."""
+    page_url = URLS.get(generator, URLS["grok"])
     br = None
     try:
         with sync_playwright() as p:
@@ -211,7 +220,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             pg = ctx.new_page()
             pg.route("**/*", lambda r: r.abort() if is_ad(r.request.url) else r.continue_())
 
-            try: pg.goto(URL, timeout=12000, wait_until='domcontentloaded')
+            try: pg.goto(page_url, timeout=12000, wait_until='domcontentloaded')
             except Exception as e:
                 return {"error": f"Navigation failed: {e}"}
 
@@ -299,7 +308,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             try: br.close()
             except: pass
 
-def run_job(job_id, prompt, model, aspect):
+def run_job(job_id, prompt, model, aspect, generator="grok"):
     """Background job: generate video. Tries direct first, then proxies as fallback."""
     with jobs_lock:
         if job_id in jobs:
@@ -307,8 +316,8 @@ def run_job(job_id, prompt, model, aspect):
             jobs[job_id]['progress'] = 'Generating...'
     save_jobs()
 
-    # Try direct first (fastest, works on first 2 videos per IP)
-    result = generate_video(prompt, model, aspect, None)
+    # Try direct first
+    result = generate_video(prompt, model, aspect, None, generator)
     if 'error' not in result:
         _finish_job(job_id, result)
         return
@@ -328,7 +337,7 @@ def run_job(job_id, prompt, model, aspect):
         save_jobs()
 
         print(f"[Job] {job_id} proxy try {i+1}: {proxy}", flush=True)
-        result = generate_video(prompt, model, aspect, proxy)
+        result = generate_video(prompt, model, aspect, proxy, generator)
 
         if 'error' not in result:
             _finish_job(job_id, result)
@@ -386,11 +395,14 @@ def load_jobs():
 @app.route('/')
 def root():
     return jsonify({'message': 'Video Generation API', 'endpoints': {
-        'POST /api/generate': 'Start video generation',
+        'POST /api/generate': 'Start video generation (body: prompt, generator: grok|seedance, model, aspect)',
         'GET /api/job/<id>': 'Check job status',
         'GET /api/jobs': 'List all jobs',
         'GET /api/status': 'Server status',
         'GET /api/proxy/find': 'Find a clean proxy',
+    }, 'generators': {
+        'grok': {'url': 'grok-ai-video-generator', 'models': MODELS['grok']},
+        'seedance': {'url': 'seedance-2-0-video-generator-free', 'models': MODELS['seedance']},
     }})
 
 @app.route('/api/status')
@@ -409,7 +421,15 @@ def api_generate():
     if not prompt: return jsonify({'error': 'prompt required'}), 400
     if len(prompt) < 15: return jsonify({'error': 'prompt must be 15+ chars'}), 400
 
+    generator = data.get('generator', 'grok')
+    if generator not in URLS: return jsonify({'error': f'Invalid generator: {generator}. Use grok or seedance'}), 400
+
     model = data.get('model', '3.1')
+    # Validate model for generator
+    valid_models = list(MODELS.get(generator, {}).keys())
+    if valid_models and model not in valid_models:
+        return jsonify({'error': f'Invalid model {model} for {generator}. Use: {valid_models}'}), 400
+
     aspect = data.get('aspect', 'portrait')
     aspect_val = "VIDEO_ASPECT_RATIO_LANDSCAPE" if aspect.lower() == 'landscape' else "VIDEO_ASPECT_RATIO_PORTRAIT"
 
@@ -418,12 +438,13 @@ def api_generate():
         jobs[job_id] = {
             'id': job_id, 'status': 'queued', 'progress': 'Queued',
             'prompt': prompt, 'model': model, 'aspect': aspect_val,
+            'generator': generator,
             'videoUrl': None, 'error': None, 'createdAt': time.time() * 1000
         }
     save_jobs(throttle=False)
 
-    threading.Thread(target=run_job, args=(job_id, prompt, model, aspect_val), daemon=True).start()
-    return jsonify({'jobId': job_id, 'status': 'queued'})
+    threading.Thread(target=run_job, args=(job_id, prompt, model, aspect_val, generator), daemon=True).start()
+    return jsonify({'jobId': job_id, 'status': 'queued', 'generator': generator})
 
 @app.route('/api/job/<job_id>')
 def api_job(job_id):
@@ -455,6 +476,9 @@ def api_quick_generate():
     if not prompt: return jsonify({'error': 'prompt required'}), 400
     if len(prompt) < 15: return jsonify({'error': 'prompt must be 15+ chars'}), 400
 
+    generator = data.get('generator', 'grok')
+    if generator not in URLS: return jsonify({'error': f'Invalid generator: {generator}'}), 400
+
     model = data.get('model', '3.1')
     aspect = data.get('aspect', 'portrait')
     aspect_val = "VIDEO_ASPECT_RATIO_LANDSCAPE" if aspect.lower() == 'landscape' else "VIDEO_ASPECT_RATIO_PORTRAIT"
@@ -463,7 +487,7 @@ def api_quick_generate():
     if not proxy:
         return jsonify({'error': 'no working proxy'}), 503
 
-    result = generate_video(prompt, model, aspect_val, proxy)
+    result = generate_video(prompt, model, aspect_val, proxy, generator)
     if 'error' in result:
         return jsonify(result), 500
     return jsonify(result)
@@ -489,7 +513,10 @@ def handle_mcp(data):
             {"name": "generate_video", "description": "Generate video from prompt",
              "inputSchema": {"type": "object", "properties": {
                  "prompt": {"type": "string"}, "model": {"type": "string"},
-                 "aspect": {"type": "string"}}, "required": ["prompt"]}},
+                 "aspect": {"type": "string"},
+                 "generator": {"type": "string", "enum": ["grok", "seedance"],
+                               "description": "grok (Grok 4/4.5) or seedance (Seedance 2.0/1.5)"}},
+                 "required": ["prompt"]}},
             {"name": "get_job", "description": "Get job status",
              "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
             {"name": "list_jobs", "description": "List all jobs",
@@ -502,13 +529,15 @@ def handle_mcp(data):
             if not pr: return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "Missing prompt"}}
             md = args.get("model", "3.1")
             asp = "VIDEO_ASPECT_RATIO_LANDSCAPE" if "landscape" in args.get("aspect", "").lower() else "VIDEO_ASPECT_RATIO_PORTRAIT"
+            gen = args.get("generator", "grok")
+            if gen not in URLS: gen = "grok"
             jid = f"mcp-{int(time.time()*1000)%1000000}"
             with jobs_lock:
                 jobs[jid] = {'id': jid, 'status': 'queued', 'progress': 'Queued via MCP',
-                             'prompt': pr, 'model': md, 'aspect': asp,
+                             'prompt': pr, 'model': md, 'aspect': asp, 'generator': gen,
                              'videoUrl': None, 'error': None, 'createdAt': time.time()*1000}
             save_jobs(throttle=False)
-            threading.Thread(target=run_job, args=(jid, pr, md, asp), daemon=True).start()
+            threading.Thread(target=run_job, args=(jid, pr, md, asp, gen), daemon=True).start()
             return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": f"Job: {jid}"}]}}
         if tn == "get_job":
             tid = args.get("job_id")
