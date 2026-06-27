@@ -44,6 +44,9 @@ proxy_pool = collections.deque(maxlen=50)
 proxy_pool_lock = threading.Lock()
 tested_proxies = set()  # avoid retesting dead proxies
 
+# --- Generation lock (only 1 Playwright browser at a time) ---
+gen_lock = threading.Lock()
+
 # --- Constants ---
 URLS = {
     "grok": "https://veoaifree.com/grok-ai-video-generator/",
@@ -313,37 +316,46 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
     with jobs_lock:
         if job_id in jobs:
             jobs[job_id]['status'] = 'processing'
-            jobs[job_id]['progress'] = 'Generating...'
+            jobs[job_id]['progress'] = 'Waiting for turn...'
     save_jobs()
 
-    # Try direct first
-    result = generate_video(prompt, model, aspect, None, generator)
-    if 'error' not in result:
-        _finish_job(job_id, result)
-        return
-
-    print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
-
-    # Fallback: try proxies from pool
-    proxies_to_try = []
-    with proxy_pool_lock:
-        while proxy_pool and len(proxies_to_try) < 3:
-            proxies_to_try.append(proxy_pool.popleft())
-
-    for i, proxy in enumerate(proxies_to_try):
+    # Only 1 Playwright browser at a time
+    print(f"[Job] {job_id} waiting for gen_lock...", flush=True)
+    with gen_lock:
+        print(f"[Job] {job_id} acquired gen_lock", flush=True)
         with jobs_lock:
             if job_id in jobs:
-                jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {proxy}'
+                jobs[job_id]['progress'] = 'Generating...'
         save_jobs()
 
-        print(f"[Job] {job_id} proxy try {i+1}: {proxy}", flush=True)
-        result = generate_video(prompt, model, aspect, proxy, generator)
-
+        # Try direct first
+        result = generate_video(prompt, model, aspect, None, generator)
         if 'error' not in result:
             _finish_job(job_id, result)
             return
 
-        print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
+        print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
+
+        # Fallback: try proxies from pool
+        proxies_to_try = []
+        with proxy_pool_lock:
+            while proxy_pool and len(proxies_to_try) < 3:
+                proxies_to_try.append(proxy_pool.popleft())
+
+        for i, proxy in enumerate(proxies_to_try):
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {proxy}'
+            save_jobs()
+
+            print(f"[Job] {job_id} proxy try {i+1}: {proxy}", flush=True)
+            result = generate_video(prompt, model, aspect, proxy, generator)
+
+            if 'error' not in result:
+                _finish_job(job_id, result)
+                return
+
+            print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
 
     # All failed
     with jobs_lock:
