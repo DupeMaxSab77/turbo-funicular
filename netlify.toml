@@ -1,0 +1,8 @@
+[build]
+  publish = "frontend"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://turbo-funicular.fly.dev/api/:splat"
+  status = 200
+  force = true
