@@ -16,7 +16,7 @@ try:
                         os.environ[_key] = _val
 except: pass
 
-import time, uuid, threading, requests, json, re, random, queue, collections
+import time, uuid, threading, requests, json, re, random, queue, collections, sys
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, Response
@@ -173,6 +173,34 @@ def _batch_playwright_test(proxies, max_clean=3):
         print(f"[proxy] Playwright batch error: {e}", flush=True)
     return clean
 
+def _run_playwright_test_subprocess(proxies, max_clean=5):
+    """Run Playwright test in a subprocess to prevent Chromium crashes from killing the server."""
+    import subprocess, json as _json, pickle, base64
+    if not proxies: return []
+
+    try:
+        data = pickle.dumps((proxies, max_clean))
+        encoded = base64.b64encode(data).decode()
+    except Exception as e:
+        print(f"[proxy-sub] Serialize error: {e}", flush=True)
+        return []
+
+    worker_script = os.path.join(SCRIPT_DIR, '_pw_worker.py')
+    try:
+        r = subprocess.run(
+            [sys.executable, worker_script, encoded],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            out = r.stdout.strip().split('\n')[-1]
+            parsed = _json.loads(out)
+            return [tuple(x) if isinstance(x, list) else x for x in parsed[0]]
+    except subprocess.TimeoutExpired:
+        print("[proxy-sub] Timeout (60s)", flush=True)
+    except Exception as e:
+        print(f"[proxy-sub] Error: {e}", flush=True)
+    return []
+
 def find_clean_proxy():
     """Get a clean proxy. Validates with Playwright before returning."""
     candidates = []
@@ -181,7 +209,7 @@ def find_clean_proxy():
             candidates.append(proxy_pool.popleft())
 
     if candidates:
-        clean = _batch_playwright_test(candidates, max_clean=1)
+        clean = _run_playwright_test_subprocess(candidates, max_clean=1)
         if clean:
             # Put back ALL untested candidates (not just failed ones)
             with proxy_pool_lock:
@@ -230,10 +258,10 @@ def proxy_refresh_loop():
 
             print(f"[proxy-refresh] Phase 1 HTTP: {len(alive)}/{len(new_proxies)} alive", flush=True)
 
-            # Phase 2: Playwright test (validates browser compatibility)
+            # Phase 2: Playwright test (validates browser compatibility) in subprocess
             clean = []
             if alive:
-                clean = _batch_playwright_test(alive[:15], max_clean=5)
+                clean = _run_playwright_test_subprocess(alive[:15], max_clean=5)
                 print(f"[proxy-refresh] Phase 2 Playwright: {len(clean)}/{len(alive[:15])} clean", flush=True)
 
                 with proxy_pool_lock:
@@ -360,12 +388,12 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 # Check progress
                 try:
                     pi = pg.evaluate("()=>{const el=document.querySelector('.show-percentage');if(el){const m=(el.textContent||'').match(/(\\d{1,3})\\s*%/);if(m)return parseInt(m[1]);}return null;}")
-                        if pi is not None and pi != last_p:
-                            last_p = pi
-                            last_change = time.time()
-                            print(f"[gen] Progress: {pi}%", flush=True)
-                            if pi >= 100 and not p100: p100 = time.time()
-                    except: pass
+                    if pi is not None and pi != last_p:
+                        last_p = pi
+                        last_change = time.time()
+                        print(f"[gen] Progress: {pi}%", flush=True)
+                        if pi >= 100 and not p100: p100 = time.time()
+                except: pass
                 # After 100%, check for video more aggressively
                 if (p100 or (last_p >= 100)) and e % 2 == 0:
                     try:
