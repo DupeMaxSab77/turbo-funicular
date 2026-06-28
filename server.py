@@ -44,8 +44,8 @@ proxy_pool = collections.deque(maxlen=50)
 proxy_pool_lock = threading.Lock()
 tested_proxies = set()  # avoid retesting dead proxies
 
-# --- Generation lock (only 1 Playwright browser at a time) ---
-gen_lock = threading.Lock()
+# --- Generation lock (3 concurrent Playwright browsers max) ---
+gen_sem = threading.Semaphore(3)
 
 # --- Constants ---
 URLS = {
@@ -243,7 +243,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             ctx.add_init_script("()=>{Object.defineProperty(navigator,'webdriver',{get:()=>false});}")
             pg = ctx.new_page()
 
-            nav_timeout = 20000 if proxy else 12000
+            nav_timeout = 15000 if proxy else 10000
             try: pg.goto(page_url, timeout=nav_timeout, wait_until='domcontentloaded')
             except Exception as e:
                 return {"error": f"Navigation failed: {e}"}
@@ -252,8 +252,13 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             if 'rate limit' in body.lower() or 'limit reached' in body.lower():
                 return {"error": "Rate limited on this proxy"}
 
-            # popups + cookies
-            pg.evaluate("()=>{document.querySelectorAll('#suOverlay,.su-overlay,.su-popup,#swContainer,[role=dialog],.modal-overlay,.overlay,.popup-overlay,.modal-backdrop').forEach(e=>e.remove());document.body.style.overflow='auto';'videoCounter=0;cookiClicked=1;ytPopup=1;ytHide=1;popupLockout=active'.split(';').forEach(c=>{document.cookie=c.trim()+';path=/;max-age=86400'});}")
+            # popups + cookies + ads
+            pg.evaluate("""()=>{
+                document.querySelectorAll('#suOverlay,.su-overlay,.su-popup,#swContainer,[role=dialog],.modal-overlay,.overlay,.popup-overlay,.modal-backdrop,[class*=popup],[class*=modal],[id*=popup],[id*=modal],[class*=interstitial],[class*=preroll],[class*=pre-roll],[class*=overlay-ad],[class*=ad-container]').forEach(e=>e.remove());
+                document.querySelectorAll('iframe[src*=ad],iframe[src*=analytics],iframe[src*=tracking],iframe[src*=doubleclick],iframe[src*=google]').forEach(e=>e.remove());
+                document.body.style.overflow='auto';
+                'videoCounter=0;cookiClicked=1;ytPopup=1;ytHide=1;popupLockout=active'.split(';').forEach(c=>{document.cookie=c.trim()+';path=/;max-age=86400'});
+            }""")
             time.sleep(1)
 
             # fill form
@@ -295,12 +300,12 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 return {"error": f"Click failed: {e}"}
 
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
-            while time.time() - t0 < 150:
+            while time.time() - t0 < 120:
                 e = int(time.time() - t0)
                 if vid[0]: break
                 if rate_limited[0]: break
-                # Early abort: no progress after 60s (generous for slow proxies)
-                if e > 60 and last_p == -1:
+                # Early abort: no progress after 45s
+                if e > 45 and last_p == -1:
                     # Double check - maybe page shows rate limit
                     try:
                         b2 = pg.evaluate("()=>document.body?.innerText||''")
@@ -309,8 +314,8 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                             break
                     except: pass
                     break
-                # Stuck at same % for 45s
-                if p100 is None and last_p > 0 and (time.time() - last_change) > 45:
+                # Stuck at same % for 30s
+                if p100 is None and last_p > 0 and (time.time() - last_change) > 30:
                     break
                 # Check progress
                 try:
@@ -377,9 +382,9 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
     save_jobs()
 
     # Only 1 Playwright browser at a time
-    print(f"[Job] {job_id} waiting for gen_lock...", flush=True)
-    with gen_lock:
-        print(f"[Job] {job_id} acquired gen_lock", flush=True)
+    print(f"[Job] {job_id} waiting for turn...", flush=True)
+    with gen_sem:
+        print(f"[Job] {job_id} generating (concurrent slot acquired)", flush=True)
         with jobs_lock:
             if job_id in jobs:
                 jobs[job_id]['progress'] = 'Generating...'
