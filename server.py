@@ -201,21 +201,27 @@ def proxy_refresh_loop():
             all_proxies = fetch_proxies()
             random.shuffle(all_proxies)
 
+            # Phase 1: HTTP test (fast, checks connectivity)
             new_proxies = [p for p in all_proxies if p not in tested_proxies]
             alive = _fast_http_filter(new_proxies, limit=300, workers=40, timeout_s=10)
 
             for p in new_proxies[:300]:
                 tested_proxies.add(p)
 
-            # Playwright-validate alive proxies before adding to pool
+            print(f"[proxy-refresh] Phase 1 HTTP: {len(alive)}/{len(new_proxies)} alive", flush=True)
+
+            # Phase 2: Playwright test (validates browser compatibility)
+            clean = []
             if alive:
                 clean = _batch_playwright_test(alive[:15], max_clean=5)
+                print(f"[proxy-refresh] Phase 2 Playwright: {len(clean)}/{len(alive[:15])} clean", flush=True)
+
                 with proxy_pool_lock:
                     for px in clean:
                         if px not in proxy_pool:
                             proxy_pool.append(px)
 
-            print(f"[proxy-refresh] Pool: {len(proxy_pool)} validated ({len(alive)} alive, {len(clean) if alive else 0} clean)", flush=True)
+            print(f"[proxy-refresh] Pool: {len(proxy_pool)} validated proxies", flush=True)
 
             if len(tested_proxies) > 3000:
                 tested_proxies.clear()
