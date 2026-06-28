@@ -254,10 +254,13 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
 
             # popups + cookies + ads
             pg.evaluate("""()=>{
-                document.querySelectorAll('#suOverlay,.su-overlay,.su-popup,#swContainer,[role=dialog],.modal-overlay,.overlay,.popup-overlay,.modal-backdrop,[class*=popup],[class*=modal],[id*=popup],[id*=modal],[class*=interstitial],[class*=preroll],[class*=pre-roll],[class*=overlay-ad],[class*=ad-container]').forEach(e=>e.remove());
-                document.querySelectorAll('iframe[src*=ad],iframe[src*=analytics],iframe[src*=tracking],iframe[src*=doubleclick],iframe[src*=google]').forEach(e=>e.remove());
+                document.querySelectorAll('#suOverlay,.su-overlay,.su-popup,#swContainer,[role=dialog],.modal-overlay,.overlay,.popup-overlay,.modal-backdrop,[class*=popup],[class*=modal],[id*=popup],[id*=modal],[class*=interstitial],[class*=preroll],[class*=pre-roll],[class*=overlay-ad],[class*=ad-container],[class*=video-ad],[class*=ad-wrapper],[class*=sponsor],[id*=video-ad],[id*=preroll]').forEach(e=>e.remove());
+                document.querySelectorAll('iframe').forEach(e=>{const s=(e.src||'').toLowerCase();if(s.includes('ad')||s.includes('analytics')||s.includes('tracking')||s.includes('doubleclick')||s.includes('google')||s.includes('peacock')||s.includes('nbc'))e.remove()});
+                document.querySelectorAll('video').forEach(v=>{const s=(v.src||v.currentSrc||'').toLowerCase();if(s.includes('peacock')||s.includes('loveisland')||s.includes('ad')||s.includes('preroll'))v.remove()});
                 document.body.style.overflow='auto';
                 'videoCounter=0;cookiClicked=1;ytPopup=1;ytHide=1;popupLockout=active'.split(';').forEach(c=>{document.cookie=c.trim()+';path=/;max-age=86400'});
+                // Auto-remove future ad elements
+                new MutationObserver(muts=>{muts.forEach(m=>{m.addedNodes.forEach(n=>{if(n.nodeType===1){const t=(n.className||'')+' '+(n.id||'');if(/ad|popup|modal|overlay|sponsor|preroll|interstitial/i.test(t))n.remove();if(n.tagName==='IFRAME'){const s=(n.src||'').toLowerCase();if(s.includes('ad')||s.includes('peacock'))n.remove()}}})})}).observe(document.body,{childList:true,subtree:true});
             }""")
             time.sleep(1)
 
