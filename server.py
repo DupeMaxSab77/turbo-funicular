@@ -183,13 +183,17 @@ def find_clean_proxy():
     if candidates:
         clean = _batch_playwright_test(candidates, max_clean=1)
         if clean:
-            # Put back untested ones
+            # Put back ALL untested candidates (not just failed ones)
             with proxy_pool_lock:
                 for px in candidates:
-                    if px not in clean and px not in proxy_pool:
+                    if px not in proxy_pool:
                         proxy_pool.append(px)
             return clean[0]
-        # None passed Playwright, return None
+        # None passed — put all back
+        with proxy_pool_lock:
+            for px in candidates:
+                if px not in proxy_pool:
+                    proxy_pool.append(px)
         return None
 
     # Pool empty — do a full scan
@@ -356,14 +360,14 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 # Check progress
                 try:
                     pi = pg.evaluate("()=>{const el=document.querySelector('.show-percentage');if(el){const m=(el.textContent||'').match(/(\\d{1,3})\\s*%/);if(m)return parseInt(m[1]);}return null;}")
-                    if pi is not None and pi != last_p:
-                        last_p = pi
-                        last_change = time.time()
-                        print(f"[gen] Progress: {pi}%", flush=True)
-                        if pi >= 100 and not p100: p100 = time.time()
-                except: pass
+                        if pi is not None and pi != last_p:
+                            last_p = pi
+                            last_change = time.time()
+                            print(f"[gen] Progress: {pi}%", flush=True)
+                            if pi >= 100 and not p100: p100 = time.time()
+                    except: pass
                 # After 100%, check for video more aggressively
-                if p100 and e % 2 == 0:
+                if (p100 or (last_p >= 100)) and e % 2 == 0:
                     try:
                         us = pg.evaluate("()=>[...new Set([...document.querySelectorAll('ul.fn__generation_list video')].map(v=>v.src||v.currentSrc).filter(Boolean).concat([...document.querySelectorAll('a.only-video-download,a.downloader-video-btn')].map(a=>a.href).filter(Boolean)).concat([...document.querySelectorAll('video source')].map(s=>s.src).filter(Boolean)))]")
                         nu = [u for u in us if u not in init and ('.mp4' in u.lower() or '.webm' in u.lower() or 'blob:' in u.lower())]
@@ -373,7 +377,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                             break
                     except: pass
                 # After 100%, also scan all links
-                if p100 and e % 5 == 0:
+                if (p100 or (last_p >= 100)) and e % 5 == 0:
                     try:
                         d = pg.evaluate("()=>{const urls=[];document.querySelectorAll('video').forEach(v=>{if(v.src)urls.push(v.src);if(v.currentSrc)urls.push(v.currentSrc)});document.querySelectorAll('a[href]').forEach(a=>{const h=a.href;if(h.includes('.mp4')||h.includes('.webm')||h.includes('blob:')||h.includes('upload'))urls.push(h)});return[...new Set(urls)]}")
                         for v in d:
@@ -411,58 +415,66 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
 
 def run_job(job_id, prompt, model, aspect, generator="grok"):
     """Background job: generate video. Tries direct first, then proxies as fallback."""
-    with jobs_lock:
-        if job_id in jobs:
-            jobs[job_id]['status'] = 'processing'
-            jobs[job_id]['progress'] = 'Waiting for turn...'
-    save_jobs()
-
-    # Only 1 Playwright browser at a time
-    print(f"[Job] {job_id} waiting for turn...", flush=True)
-    with gen_sem:
-        print(f"[Job] {job_id} generating (concurrent slot acquired)", flush=True)
+    try:
         with jobs_lock:
             if job_id in jobs:
-                jobs[job_id]['progress'] = 'Generating...'
+                jobs[job_id]['status'] = 'processing'
+                jobs[job_id]['progress'] = 'Waiting for turn...'
         save_jobs()
 
-        # Try direct first
-        result = generate_video(prompt, model, aspect, None, generator)
-        if 'error' not in result:
-            _finish_job(job_id, result)
-            return
-
-        print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
-
-        # Fallback: try proxies from pool
-        proxies_to_try = []
-        with proxy_pool_lock:
-            while proxy_pool and len(proxies_to_try) < 3:
-                proxies_to_try.append(proxy_pool.popleft())
-
-        for i, proxy in enumerate(proxies_to_try):
-            label = f"{proxy[0]}://{proxy[1]}" if isinstance(proxy, tuple) else str(proxy)
+        print(f"[Job] {job_id} waiting for turn...", flush=True)
+        with gen_sem:
+            print(f"[Job] {job_id} generating (concurrent slot acquired)", flush=True)
             with jobs_lock:
                 if job_id in jobs:
-                    jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {label}'
+                    jobs[job_id]['progress'] = 'Generating...'
             save_jobs()
 
-            print(f"[Job] {job_id} proxy try {i+1}: {label}", flush=True)
-            result = generate_video(prompt, model, aspect, proxy, generator)
-
+            # Try direct first
+            result = generate_video(prompt, model, aspect, None, generator)
             if 'error' not in result:
                 _finish_job(job_id, result)
                 return
 
-            print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
+            print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
 
-    # All failed
-    with jobs_lock:
-        if job_id in jobs:
-            jobs[job_id]['status'] = 'failed'
-            jobs[job_id]['error'] = result.get('error', 'All attempts failed') if result else 'All attempts failed'
-            jobs[job_id]['progress'] = 'Failed'
-    save_jobs()
+            # Fallback: try proxies from pool
+            proxies_to_try = []
+            with proxy_pool_lock:
+                while proxy_pool and len(proxies_to_try) < 3:
+                    proxies_to_try.append(proxy_pool.popleft())
+
+            for i, proxy in enumerate(proxies_to_try):
+                label = f"{proxy[0]}://{proxy[1]}" if isinstance(proxy, tuple) else str(proxy)
+                with jobs_lock:
+                    if job_id in jobs:
+                        jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {label}'
+                save_jobs()
+
+                print(f"[Job] {job_id} proxy try {i+1}: {label}", flush=True)
+                result = generate_video(prompt, model, aspect, proxy, generator)
+
+                if 'error' not in result:
+                    _finish_job(job_id, result)
+                    return
+
+                print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
+
+        # All failed
+        with jobs_lock:
+            if job_id in jobs:
+                jobs[job_id]['status'] = 'failed'
+                jobs[job_id]['error'] = result.get('error', 'All attempts failed') if result else 'All attempts failed'
+                jobs[job_id]['progress'] = 'Failed'
+        save_jobs()
+    except Exception as e:
+        print(f"[Job] {job_id} CRASHED: {e}", flush=True)
+        with jobs_lock:
+            if job_id in jobs:
+                jobs[job_id]['status'] = 'failed'
+                jobs[job_id]['error'] = f'Unexpected error: {e}'
+                jobs[job_id]['progress'] = 'Failed'
+        save_jobs()
 
 def _finish_job(job_id, result):
     with jobs_lock:
@@ -499,6 +511,22 @@ def load_jobs():
                     with jobs_lock: jobs.update(loaded)
     except: pass
 
+def cleanup_stale_jobs():
+    """Remove jobs older than 1 hour or keep max 100 jobs."""
+    with jobs_lock:
+        now = time.time() * 1000
+        stale = [jid for jid, j in jobs.items()
+                 if now - j.get('createdAt', now) > 3600000]  # 1 hour
+        for jid in stale:
+            del jobs[jid]
+        # If still too many, keep newest 100
+        if len(jobs) > 100:
+            sorted_jobs = sorted(jobs.items(), key=lambda x: x[1].get('createdAt', 0), reverse=True)
+            keep = {jid: j for jid, j in sorted_jobs[:100]}
+            jobs.clear()
+            jobs.update(keep)
+    save_jobs(throttle=False)
+
 # ============================================================
 #  API ROUTES
 # ============================================================
@@ -528,7 +556,7 @@ def status():
 @app.route('/api/generate', methods=['POST'])
 def api_generate():
     data = request.json or {}
-    prompt = data.get('prompt', '')
+    prompt = (data.get('prompt') or '').strip()
     if not prompt: return jsonify({'error': 'prompt required'}), 400
     if len(prompt) < 15: return jsonify({'error': 'prompt must be 15+ chars'}), 400
 
@@ -544,7 +572,7 @@ def api_generate():
     aspect = data.get('aspect', 'portrait')
     aspect_val = "VIDEO_ASPECT_RATIO_LANDSCAPE" if aspect.lower() == 'landscape' else "VIDEO_ASPECT_RATIO_PORTRAIT"
 
-    job_id = f"vid-{int(time.time() * 1000) % 1000000}"
+    job_id = f"vid-{uuid.uuid4().hex[:8]}"
     with jobs_lock:
         jobs[job_id] = {
             'id': job_id, 'status': 'queued', 'progress': 'Queued',
@@ -583,7 +611,7 @@ def api_proxy_find():
 def api_quick_generate():
     """Synchronous generation - waits for result (up to 5 min)."""
     data = request.json or {}
-    prompt = data.get('prompt', '')
+    prompt = (data.get('prompt') or '').strip()
     if not prompt: return jsonify({'error': 'prompt required'}), 400
     if len(prompt) < 15: return jsonify({'error': 'prompt must be 15+ chars'}), 400
 
@@ -642,7 +670,7 @@ def handle_mcp(data):
             asp = "VIDEO_ASPECT_RATIO_LANDSCAPE" if "landscape" in args.get("aspect", "").lower() else "VIDEO_ASPECT_RATIO_PORTRAIT"
             gen = args.get("generator", "grok")
             if gen not in URLS: gen = "grok"
-            jid = f"mcp-{int(time.time()*1000)%1000000}"
+            jid = f"mcp-{uuid.uuid4().hex[:8]}"
             with jobs_lock:
                 jobs[jid] = {'id': jid, 'status': 'queued', 'progress': 'Queued via MCP',
                              'prompt': pr, 'model': md, 'aspect': asp, 'generator': gen,
@@ -697,6 +725,7 @@ def mcp_messages():
 # ============================================================
 
 load_jobs()
+cleanup_stale_jobs()
 
 # Start proxy auto-refresh
 threading.Thread(target=proxy_refresh_loop, daemon=True).start()
