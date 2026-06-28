@@ -56,6 +56,22 @@ MODELS = {
     "grok": {"3.1": "Grok 4", "2.0": "Grok 4.5"},
     "seedance": {"2.0": "Seedance 2.0", "1.5": "Seedance"},
 }
+AD_VIDEO_DOMAINS = [
+    "pagead2.googlesyndication.com", "googleadservices.com", "doubleclick.net",
+    "googlesyndication.com", "google-analytics.com", "adnxs.com", "adservice.google.com",
+    "flashtalking.com", "taboola.com", "outbrain.com", "facebook.com/tr",
+    "amazon-adsystem.com", "adskeeper.com", "propellerads.com", "adcolony.com",
+    "moatads.com", "quantserve.com", "scorecardresearch.com", "bluekai.com",
+    "rubiconproject.com", "casalemedia.com", "pubmatic.com", "openx.net",
+    "serving-sys.com", "bidswitch.net", "sharethrough.com", "spotxchange.com",
+    "yieldmo.com", "teads.tv", "connatix.com", "jidraider.com",
+]
+
+def is_ad_video_url(url):
+    """Check if URL is from an ad/tracking domain."""
+    u = url.lower()
+    return any(d in u for d in AD_VIDEO_DOMAINS)
+
 AD = ["clickiocdn", "google-analytics", "googletagmanager", "doubleclick",
       "facebook", "hotjar", "clarity", "adnxs", "taboola", "outbrain"]
 
@@ -291,7 +307,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             rate_limited = [False]
             def on_r(resp):
                 u = resp.url
-                if is_ad(u): return
+                if is_ad(u) or is_ad_video_url(u): return
                 if 'admin-ajax.php' in u.lower() and resp.request.method == 'POST':
                     try:
                         b = resp.text().strip()
@@ -300,14 +316,17 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                             rate_limited[0] = True
                             return
                         if b.startswith('http') and any(x in b.lower() for x in ['.mp4', '.webm']):
-                            vid[0] = b.replace('videos/', 'video/')
-                            print(f"[gen] AJAX URL: {vid[0]}", flush=True)
+                            if not is_ad_video_url(b):
+                                vid[0] = b.replace('videos/', 'video/')
+                                print(f"[gen] AJAX URL: {vid[0]}", flush=True)
+                            else:
+                                print(f"[gen] Filtered ad URL: {b[:80]}", flush=True)
                         elif 'limit' not in b.lower() and len(b) > 10:
                             print(f"[gen] AJAX resp ({len(b)} chars): {b[:200]}", flush=True)
                     except: pass
                 # Also catch video URLs in any response
                 if any(x in u.lower() for x in ['.mp4', '.webm']) and 'admin-ajax' not in u.lower():
-                    if u not in init:
+                    if u not in init and not is_ad_video_url(u):
                         vid[0] = u
             pg.on('response', on_r)
 
