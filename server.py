@@ -305,7 +305,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             ctx.add_init_script("()=>{Object.defineProperty(navigator,'webdriver',{get:()=>false});}")
             pg = ctx.new_page()
 
-            nav_timeout = 15000 if proxy else 10000
+            nav_timeout = 8000 if proxy else 6000
             try: pg.goto(page_url, timeout=nav_timeout, wait_until='domcontentloaded')
             except Exception as e:
                 return {"error": f"Navigation failed: {e}"}
@@ -368,12 +368,12 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 return {"error": f"Click failed: {e}"}
 
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
-            while time.time() - t0 < 120:
+            while time.time() - t0 < 90:
                 e = int(time.time() - t0)
                 if vid[0]: break
                 if rate_limited[0]: break
-                # Early abort: no progress after 45s
-                if e > 45 and last_p == -1:
+                # Early abort: no progress after 30s
+                if e > 30 and last_p == -1:
                     # Double check - maybe page shows rate limit
                     try:
                         b2 = pg.evaluate("()=>document.body?.innerText||''")
@@ -382,8 +382,8 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                             break
                     except: pass
                     break
-                # Stuck at same % for 30s
-                if p100 is None and last_p > 0 and (time.time() - last_change) > 30:
+                # Stuck at same % for 20s
+                if p100 is None and last_p > 0 and (time.time() - last_change) > 20:
                     break
                 # Check progress
                 try:
@@ -442,7 +442,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             except: pass
 
 def run_job(job_id, prompt, model, aspect, generator="grok"):
-    """Background job: generate video. Tries direct first, then proxies as fallback."""
+    """Background job: generate video. Tries direct first, then proxies until success."""
     try:
         with jobs_lock:
             if job_id in jobs:
@@ -466,35 +466,54 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
 
             print(f"[Job] {job_id} direct failed: {result.get('error','?')}", flush=True)
 
-            # Fallback: try proxies from pool
-            proxies_to_try = []
-            with proxy_pool_lock:
-                while proxy_pool and len(proxies_to_try) < 3:
-                    proxies_to_try.append(proxy_pool.popleft())
+            # Retry loop: keep trying proxies until success or exhausted
+            attempt = 0
+            max_attempts = 10  # safety limit
+            while attempt < max_attempts:
+                # Get next proxy from pool
+                proxy = None
+                with proxy_pool_lock:
+                    if proxy_pool:
+                        proxy = proxy_pool.popleft()
 
-            for i, proxy in enumerate(proxies_to_try):
+                if not proxy:
+                    # Pool empty — try a full scan
+                    print(f"[Job] {job_id} pool empty, scanning...", flush=True)
+                    proxy = find_clean_proxy()
+
+                if not proxy:
+                    print(f"[Job] {job_id} no more proxies available", flush=True)
+                    break
+
+                attempt += 1
                 label = f"{proxy[0]}://{proxy[1]}" if isinstance(proxy, tuple) else str(proxy)
                 with jobs_lock:
                     if job_id in jobs:
-                        jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {label}'
+                        jobs[job_id]['progress'] = f'Proxy attempt {attempt}: {label}'
                 save_jobs()
 
-                print(f"[Job] {job_id} proxy try {i+1}: {label}", flush=True)
+                print(f"[Job] {job_id} proxy attempt {attempt}: {label}", flush=True)
                 result = generate_video(prompt, model, aspect, proxy, generator)
 
                 if 'error' not in result:
                     _finish_job(job_id, result)
                     return
 
-                print(f"[Job] {job_id} failed: {result.get('error','?')}", flush=True)
+                err = result.get('error', '?')
+                print(f"[Job] {job_id} attempt {attempt} failed: {err}", flush=True)
 
-        # All failed
-        with jobs_lock:
-            if job_id in jobs:
-                jobs[job_id]['status'] = 'failed'
-                jobs[job_id]['error'] = result.get('error', 'All attempts failed') if result else 'All attempts failed'
-                jobs[job_id]['progress'] = 'Failed'
-        save_jobs()
+                # If rate limited, stop retrying (no point)
+                if 'rate limit' in err.lower():
+                    break
+
+            # All failed
+            final_error = result.get('error', 'All attempts failed') if result else 'All attempts failed'
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['error'] = final_error
+                    jobs[job_id]['progress'] = 'Failed'
+            save_jobs()
     except Exception as e:
         print(f"[Job] {job_id} CRASHED: {e}", flush=True)
         with jobs_lock:
