@@ -242,7 +242,14 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
             ctx.add_init_script("()=>{Object.defineProperty(navigator,'webdriver',{get:()=>false});}")
             pg = ctx.new_page()
-            pg.route("**/*", lambda r: r.abort() if is_ad(r.request.url) else r.continue_())
+            def handle_route(r):
+                try:
+                    if is_ad(r.request.url):
+                        r.abort()
+                    else:
+                        r.continue_()
+                except: pass
+            pg.route("**/*", handle_route)
 
             nav_timeout = 20000 if proxy else 12000
             try: pg.goto(page_url, timeout=nav_timeout, wait_until='domcontentloaded')
@@ -346,6 +353,8 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 time.sleep(2 if p100 else 3)
 
             pg.remove_listener('response', on_r)
+            try: pg.unroute("**/*")
+            except: pass
 
             if rate_limited[0] and not vid[0]:
                 return {"error": "Rate limited on this proxy"}
