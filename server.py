@@ -67,12 +67,17 @@ def is_ad(u): return any(d in u.lower() for d in AD)
 
 def fetch_proxies():
     srcs = [
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=1000&country=all&ssl=yes&anonymity=elite",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        # HTTP proxies
+        ("http", "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=2000&country=all&ssl=yes&anonymity=elite"),
+        ("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
+        ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+        # SOCKS5 proxies (often faster/more stable)
+        ("socks5", "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=2000&country=all&anonymity=elite"),
+        ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
+        ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
     ]
-    pxs = set()
-    for url in srcs:
+    pxs = []  # list of (type, proxy) tuples
+    for ptype, url in srcs:
         try:
             r = requests.get(url, timeout=5)
             for line in r.text.split('\n'):
@@ -80,17 +85,20 @@ def fetch_proxies():
                 if v and ':' in v and not v.startswith('#'):
                     parts = v.split(':')
                     if len(parts) == 2 and parts[1].isdigit():
-                        pxs.add(v)
+                        pxs.append((ptype, v))
         except: pass
-    return list(pxs)
+    random.shuffle(pxs)
+    return pxs
 
-def http_test(proxy):
-    """Quick HTTP reachability test. Returns proxy if alive, else None."""
+def http_test(proxy_tuple):
+    """Quick HTTP reachability test. Returns (type, proxy) if alive, else None."""
+    ptype, proxy = proxy_tuple
+    scheme = "socks5" if ptype == "socks5" else "http"
     try:
         r = requests.get("https://veoaifree.com/",
-                         proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
-                         timeout=2, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'})
-        if r.status_code == 200: return proxy
+                         proxies={"http": f"{scheme}://{proxy}", "https": f"{scheme}://{proxy}"},
+                         timeout=3, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'})
+        if r.status_code == 200: return proxy_tuple
     except: pass
     return None
 
@@ -111,13 +119,20 @@ def _batch_playwright_test(proxies, max_clean=3):
     """Test proxies using ONE shared Playwright browser. Returns clean proxies."""
     clean = []
     if not proxies: return clean
-    test_url = URLS["grok"]  # Use grok page for proxy testing
+    test_url = URLS["grok"]
     try:
         with sync_playwright() as p:
             br = p.chromium.launch(headless=True, args=[
                 '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
             for px in proxies:
-                ctx = br.new_context(proxy={"server": f"http://{px}"},
+                # px can be tuple (type, addr) or string (legacy)
+                if isinstance(px, tuple):
+                    ptype, paddr = px
+                    scheme = "socks5" if ptype == "socks5" else "http"
+                    proxy_str = f"{scheme}://{paddr}"
+                else:
+                    proxy_str = f"http://{px}"
+                ctx = br.new_context(proxy={"server": proxy_str},
                     viewport={'width': 1280, 'height': 720}, locale='en-US',
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
                 pg = ctx.new_page()
@@ -207,7 +222,7 @@ def proxy_refresh_loop():
 # ============================================================
 
 def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", proxy=None, generator="grok"):
-    """Generate video. Returns dict with videoUrl or error."""
+    """Generate video. proxy can be a string (legacy) or tuple (type, addr)."""
     page_url = URLS.get(generator, URLS["grok"])
     br = None
     try:
@@ -215,7 +230,13 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             kw = {'headless': True, 'args': [
                 '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
                 '--disable-blink-features=AutomationControlled']}
-            if proxy: kw['proxy'] = {"server": f"http://{proxy}"}
+            if proxy:
+                if isinstance(proxy, tuple):
+                    ptype, paddr = proxy
+                    scheme = "socks5" if ptype == "socks5" else "http"
+                    kw['proxy'] = {"server": f"{scheme}://{paddr}"}
+                else:
+                    kw['proxy'] = {"server": f"http://{proxy}"}
             br = p.chromium.launch(**kw)
             ctx = br.new_context(viewport={'width': 1280, 'height': 720}, locale='en-US',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
@@ -380,12 +401,13 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
                 proxies_to_try.append(proxy_pool.popleft())
 
         for i, proxy in enumerate(proxies_to_try):
+            label = f"{proxy[0]}://{proxy[1]}" if isinstance(proxy, tuple) else str(proxy)
             with jobs_lock:
                 if job_id in jobs:
-                    jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {proxy}'
+                    jobs[job_id]['progress'] = f'Proxy retry {i+1}/{len(proxies_to_try)}: {label}'
             save_jobs()
 
-            print(f"[Job] {job_id} proxy try {i+1}: {proxy}", flush=True)
+            print(f"[Job] {job_id} proxy try {i+1}: {label}", flush=True)
             result = generate_video(prompt, model, aspect, proxy, generator)
 
             if 'error' not in result:
