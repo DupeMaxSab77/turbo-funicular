@@ -305,7 +305,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             ctx.add_init_script("()=>{Object.defineProperty(navigator,'webdriver',{get:()=>false});}")
             pg = ctx.new_page()
 
-            nav_timeout = 8000 if proxy else 6000
+            nav_timeout = 20000 if proxy else 10000
             try: pg.goto(page_url, timeout=nav_timeout, wait_until='domcontentloaded')
             except Exception as e:
                 return {"error": f"Navigation failed: {e}"}
@@ -366,6 +366,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             try: pg.locator('#generate_it').click(force=True, timeout=5000)
             except Exception as e:
                 return {"error": f"Click failed: {e}"}
+            print(f"[gen] Clicked. Waiting for progress...", flush=True)
 
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
             while time.time() - t0 < 90:
@@ -468,7 +469,7 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
 
             # Retry loop: keep trying proxies until success or exhausted
             attempt = 0
-            max_attempts = 10  # safety limit
+            max_attempts = 30  # keep trying until video generated
             while attempt < max_attempts:
                 # Get next proxy from pool
                 proxy = None

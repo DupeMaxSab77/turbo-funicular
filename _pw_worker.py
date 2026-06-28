@@ -23,7 +23,7 @@ def _batch_playwright_test(proxies, max_clean=3):
                 pg = ctx.new_page()
                 try:
                     t0 = time.time()
-                    pg.goto(test_url, timeout=5000, wait_until='domcontentloaded')
+                    pg.goto(test_url, timeout=10000, wait_until='domcontentloaded')
                     elapsed = time.time() - t0
                     body = pg.evaluate("()=>document.body?.innerText||''")
                     if 'rate limit' not in body.lower() and 'limit reached' not in body.lower() and len(body) > 500 and elapsed < 4.5:
