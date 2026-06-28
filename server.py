@@ -223,7 +223,8 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             pg = ctx.new_page()
             pg.route("**/*", lambda r: r.abort() if is_ad(r.request.url) else r.continue_())
 
-            try: pg.goto(page_url, timeout=12000, wait_until='domcontentloaded')
+            nav_timeout = 20000 if proxy else 12000
+            try: pg.goto(page_url, timeout=nav_timeout, wait_until='domcontentloaded')
             except Exception as e:
                 return {"error": f"Navigation failed: {e}"}
 
@@ -233,74 +234,110 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
 
             # popups + cookies
             pg.evaluate("()=>{document.querySelectorAll('#suOverlay,.su-overlay,.su-popup,#swContainer,[role=dialog],.modal-overlay,.overlay,.popup-overlay,.modal-backdrop').forEach(e=>e.remove());document.body.style.overflow='auto';'videoCounter=0;cookiClicked=1;ytPopup=1;ytHide=1;popupLockout=active'.split(';').forEach(c=>{document.cookie=c.trim()+';path=/;max-age=86400'});}")
+            time.sleep(1)
 
             # fill form
             pg.evaluate("""([m,a,t])=>{
                 for(const p of document.querySelectorAll('svg path')){if((p.getAttribute('d')||'').includes('M408')){const c=p.closest('svg')||p.closest('a')||p.closest('button')||p.parentElement;if(c)c.dispatchEvent(new MouseEvent('click',{bubbles:true}));break;}}
-                setTimeout(()=>{document.querySelector('#modal').value=m;document.querySelector('#modal').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#aspect-ration').value=a;document.querySelector('#aspect-ration').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#fn__include_textarea').value=t;document.querySelector('#fn__include_textarea').dispatchEvent(new Event('input',{bubbles:true}));},300);
+                setTimeout(()=>{document.querySelector('#modal').value=m;document.querySelector('#modal').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#aspect-ration').value=a;document.querySelector('#aspect-ration').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#fn__include_textarea').value=t;document.querySelector('#fn__include_textarea').dispatchEvent(new Event('input',{bubbles:true}));},500);
             }""", [model, aspect, prompt])
-            time.sleep(1)
+            time.sleep(1.5)
 
             init = set(pg.evaluate("()=>[...new Set([...document.querySelectorAll('video,source,a,img')].map(e=>e.src||e.href||e.currentSrc||'').filter(Boolean))]"))
 
             vid = [None]
+            rate_limited = [False]
             def on_r(resp):
                 u = resp.url
-                if is_ad(u) or 'admin-ajax.php' not in u.lower() or resp.request.method != 'POST': return
-                try:
-                    b = resp.text().strip()
-                    if not b: return
-                    if 'rate limit' in b.lower() or 'limit reached' in b.lower(): return
-                    if b.startswith('http') and any(x in b.lower() for x in ['.mp4', '.webm']):
-                        vid[0] = b.replace('videos/', 'video/')
-                except: pass
+                if is_ad(u): return
+                if 'admin-ajax.php' in u.lower() and resp.request.method == 'POST':
+                    try:
+                        b = resp.text().strip()
+                        if not b: return
+                        if 'rate limit' in b.lower() or 'limit reached' in b.lower():
+                            rate_limited[0] = True
+                            return
+                        if b.startswith('http') and any(x in b.lower() for x in ['.mp4', '.webm']):
+                            vid[0] = b.replace('videos/', 'video/')
+                            print(f"[gen] AJAX URL: {vid[0]}", flush=True)
+                        elif 'limit' not in b.lower() and len(b) > 10:
+                            print(f"[gen] AJAX resp ({len(b)} chars): {b[:200]}", flush=True)
+                    except: pass
+                # Also catch video URLs in any response
+                if any(x in u.lower() for x in ['.mp4', '.webm']) and 'admin-ajax' not in u.lower():
+                    if u not in init:
+                        vid[0] = u
             pg.on('response', on_r)
 
+            print(f"[gen] Clicking generate...", flush=True)
             try: pg.locator('#generate_it').click(force=True, timeout=5000)
             except Exception as e:
                 return {"error": f"Click failed: {e}"}
 
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
-            while time.time() - t0 < 120:
+            while time.time() - t0 < 150:
                 e = int(time.time() - t0)
                 if vid[0]: break
-                if e > 40 and last_p == -1: break
-                if p100 is None and last_p > 0 and (time.time() - last_change) > 30: break
-                if e % 15 == 0:
+                if rate_limited[0]: break
+                # Early abort: no progress after 60s (generous for slow proxies)
+                if e > 60 and last_p == -1:
+                    # Double check - maybe page shows rate limit
                     try:
                         b2 = pg.evaluate("()=>document.body?.innerText||''")
-                        if 'rate limit' in b2.lower() or 'limit reached' in b2.lower(): break
-                    except: break
+                        if 'rate limit' in b2.lower() or 'limit reached' in b2.lower():
+                            rate_limited[0] = True
+                            break
+                    except: pass
+                    break
+                # Stuck at same % for 45s
+                if p100 is None and last_p > 0 and (time.time() - last_change) > 45:
+                    break
+                # Check progress
                 try:
                     pi = pg.evaluate("()=>{const el=document.querySelector('.show-percentage');if(el){const m=(el.textContent||'').match(/(\\d{1,3})\\s*%/);if(m)return parseInt(m[1]);}return null;}")
                     if pi is not None and pi != last_p:
                         last_p = pi
                         last_change = time.time()
+                        print(f"[gen] Progress: {pi}%", flush=True)
                         if pi >= 100 and not p100: p100 = time.time()
                 except: pass
-                if p100 and e % 3 == 0:
+                # After 100%, check for video more aggressively
+                if p100 and e % 2 == 0:
                     try:
-                        us = pg.evaluate("()=>[...new Set([...document.querySelectorAll('ul.fn__generation_list video')].map(v=>v.src||v.currentSrc).filter(Boolean).concat([...document.querySelectorAll('a.only-video-download,a.downloader-video-btn')].map(a=>a.href).filter(Boolean)))]")
-                        nu = [u for u in us if u not in init and ('.mp4' in u.lower() or '.webm' in u.lower())]
-                        if nu: vid[0] = nu[0]; break
+                        us = pg.evaluate("()=>[...new Set([...document.querySelectorAll('ul.fn__generation_list video')].map(v=>v.src||v.currentSrc).filter(Boolean).concat([...document.querySelectorAll('a.only-video-download,a.downloader-video-btn')].map(a=>a.href).filter(Boolean)).concat([...document.querySelectorAll('video source')].map(s=>s.src).filter(Boolean)))]")
+                        nu = [u for u in us if u not in init and ('.mp4' in u.lower() or '.webm' in u.lower() or 'blob:' in u.lower())]
+                        if nu:
+                            vid[0] = nu[0]
+                            print(f"[gen] Found video in DOM: {vid[0][:80]}", flush=True)
+                            break
                     except: pass
+                # After 100%, also scan all links
                 if p100 and e % 5 == 0:
                     try:
-                        d = pg.evaluate("()=>({v:[...document.querySelectorAll('video')].map(v=>v.src||v.currentSrc).filter(Boolean),l:[...document.querySelectorAll('a[href]')].map(a=>a.href).filter(h=>h.includes('.mp4')||h.includes('.webm')||h.includes('blob:')||h.includes('upload'))})")
-                        for v in d.get('v', []) + d.get('l', []):
-                            if v and ('.mp4' in v or '.webm' in v): vid[0] = v; break
+                        d = pg.evaluate("()=>{const urls=[];document.querySelectorAll('video').forEach(v=>{if(v.src)urls.push(v.src);if(v.currentSrc)urls.push(v.currentSrc)});document.querySelectorAll('a[href]').forEach(a=>{const h=a.href;if(h.includes('.mp4')||h.includes('.webm')||h.includes('blob:')||h.includes('upload'))urls.push(h)});return[...new Set(urls)]}")
+                        for v in d:
+                            if v and ('.mp4' in v or '.webm' in v) and v not in init:
+                                vid[0] = v
+                                print(f"[gen] Found video in links: {vid[0][:80]}", flush=True)
+                                break
                         if vid[0]: break
                     except: pass
                 time.sleep(2 if p100 else 3)
 
             pg.remove_listener('response', on_r)
 
+            if rate_limited[0] and not vid[0]:
+                return {"error": "Rate limited on this proxy"}
+
             if vid[0]:
+                # Validate video URL
                 try:
                     h = requests.head(vid[0], timeout=15, allow_redirects=True)
+                    ct = h.headers.get('content-type', '?')
+                    cl = h.headers.get('content-length', '?')
+                    print(f"[gen] Validated: {h.status_code} {ct} {cl}", flush=True)
                     return {"videoUrl": vid[0], "status": h.status_code,
-                            "contentType": h.headers.get('content-type', '?'),
-                            "contentLength": h.headers.get('content-length', '?')}
+                            "contentType": ct, "contentLength": cl}
                 except:
                     return {"videoUrl": vid[0]}
             return {"error": "Video generation timed out or URL not found"}
