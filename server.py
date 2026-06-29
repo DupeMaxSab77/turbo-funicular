@@ -336,6 +336,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             init = set(pg.evaluate("()=>[...new Set([...document.querySelectorAll('video,source,a,img')].map(e=>e.src||e.href||e.currentSrc||'').filter(Boolean))]"))
 
             vid = [None]
+            rate_limited = [False]
             def on_r(resp):
                 u = resp.url
                 if is_ad(u) or is_ad_video_url(u): return
@@ -343,16 +344,17 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                     try:
                         b = resp.text().strip()
                         if not b: return
+                        if 'rate-limit-exceed' in b or ('limit reached' in b.lower() and '<div' in b):
+                            rate_limited[0] = True
+                            print(f"[gen] REAL rate limit from site: {b[:150]}", flush=True)
+                            return
                         if b.startswith('http') and any(x in b.lower() for x in ['.mp4', '.webm']):
                             if not is_ad_video_url(b):
                                 vid[0] = b.replace('videos/', 'video/')
                                 print(f"[gen] AJAX URL: {vid[0]}", flush=True)
                             else:
                                 print(f"[gen] Filtered ad URL: {b[:80]}", flush=True)
-                        elif '<div' in b and ('rate limit' in b.lower() or 'limit reached' in b.lower()):
-                            # Ad overlay with fake rate limit — always ignore
-                            print(f"[gen] Ignoring ad rate-limit overlay", flush=True)
-                        elif len(b) > 10:
+                        elif len(b) > 10 and not b.startswith('<div'):
                             print(f"[gen] AJAX resp ({len(b)} chars): {b[:200]}", flush=True)
                     except: pass
                 # Also catch video URLs in any response
@@ -371,6 +373,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             while time.time() - t0 < 300:
                 e = int(time.time() - t0)
                 if vid[0]: break
+                if rate_limited[0] and last_p == -1: break
                 # Early abort: no progress after 60s
                 if e > 60 and last_p == -1:
                     break
@@ -417,6 +420,9 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 time.sleep(2 if p100 else 3)
 
             pg.remove_listener('response', on_r)
+
+            if rate_limited[0] and not vid[0]:
+                return {"error": "Rate limited — free generations used on this IP. Use proxy."}
 
             if vid[0]:
                 # Validate video URL
