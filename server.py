@@ -376,7 +376,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                 e = int(time.time() - t0)
                 last_p_ref[0] = last_p
                 if vid[0]: break
-                if rate_limited[0]: break
+                if rate_limited[0] and last_p == -1: break
                 # Early abort: no progress after 60s
                 if e > 60 and last_p == -1:
                     break
