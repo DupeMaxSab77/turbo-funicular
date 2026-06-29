@@ -335,6 +335,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
 
             vid = [None]
             rate_limited = [False]
+            last_p_ref = [-1]
             def on_r(resp):
                 u = resp.url
                 if is_ad(u) or is_ad_video_url(u): return
@@ -342,16 +343,20 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                     try:
                         b = resp.text().strip()
                         if not b: return
-                        if 'rate limit' in b.lower() or 'limit reached' in b.lower():
-                            rate_limited[0] = True
-                            return
                         if b.startswith('http') and any(x in b.lower() for x in ['.mp4', '.webm']):
                             if not is_ad_video_url(b):
                                 vid[0] = b.replace('videos/', 'video/')
                                 print(f"[gen] AJAX URL: {vid[0]}", flush=True)
                             else:
                                 print(f"[gen] Filtered ad URL: {b[:80]}", flush=True)
-                        elif 'limit' not in b.lower() and len(b) > 10:
+                        elif '<div' in b and ('rate limit' in b.lower() or 'limit reached' in b.lower()):
+                            # Only set rate_limited if NO progress yet (ads show fake rate limits)
+                            if last_p_ref[0] == -1:
+                                rate_limited[0] = True
+                                print(f"[gen] RATE LIMITED (no progress): {b[:150]}", flush=True)
+                            else:
+                                print(f"[gen] Ignoring fake rate-limit (progress={last_p_ref[0]}%)", flush=True)
+                        elif len(b) > 10:
                             print(f"[gen] AJAX resp ({len(b)} chars): {b[:200]}", flush=True)
                     except: pass
                 # Also catch video URLs in any response
@@ -369,6 +374,7 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
             while time.time() - t0 < 300:
                 e = int(time.time() - t0)
+                last_p_ref[0] = last_p
                 if vid[0]: break
                 if rate_limited[0]: break
                 # Early abort: no progress after 60s
