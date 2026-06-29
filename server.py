@@ -369,12 +369,12 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             print(f"[gen] Clicked. Waiting for progress...", flush=True)
 
             t0 = time.time(); last_p = -1; p100 = None; last_change = time.time()
-            while time.time() - t0 < 90:
+            while time.time() - t0 < 300:
                 e = int(time.time() - t0)
                 if vid[0]: break
                 if rate_limited[0]: break
-                # Early abort: no progress after 30s
-                if e > 30 and last_p == -1:
+                # Early abort: no progress after 60s
+                if e > 60 and last_p == -1:
                     # Double check - maybe page shows rate limit
                     try:
                         b2 = pg.evaluate("()=>document.body?.innerText||''")
@@ -383,8 +383,8 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                             break
                     except: pass
                     break
-                # Stuck at same % for 20s
-                if p100 is None and last_p > 0 and (time.time() - last_change) > 20:
+                # Stuck at same % for 45s
+                if p100 is None and last_p > 0 and (time.time() - last_change) > 45:
                     break
                 # Check progress
                 try:
