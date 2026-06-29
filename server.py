@@ -51,10 +51,12 @@ gen_sem = threading.Semaphore(3)
 URLS = {
     "grok": "https://veoaifree.com/grok-ai-video-generator/",
     "seedance": "https://veoaifree.com/seedance-2-0-video-generator-free/",
+    "veo": "https://veoaifree.com/veo-video-generator/",
 }
 MODELS = {
     "grok": {"3.1": "Grok 4", "2.0": "Grok 4.5"},
     "seedance": {"2.0": "Seedance 2.0", "1.5": "Seedance"},
+    "veo": {"3.1": "Google VEO 3.1", "2.0": "Google VEO 2.0"},
 }
 AD_VIDEO_DOMAINS = [
     "pagead2.googlesyndication.com", "googleadservices.com", "doubleclick.net",
@@ -327,9 +329,12 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
             time.sleep(1)
 
             # fill form
+            quality_js = ""
+            if generator == "veo":
+                quality_js = "var qs=document.querySelector('#video_quality');if(qs){qs.value='720p';qs.dispatchEvent(new Event('change',{bubbles:true}));}"
             pg.evaluate("""([m,a,t])=>{
                 for(const p of document.querySelectorAll('svg path')){if((p.getAttribute('d')||'').includes('M408')){const c=p.closest('svg')||p.closest('a')||p.closest('button')||p.parentElement;if(c)c.dispatchEvent(new MouseEvent('click',{bubbles:true}));break;}}
-                setTimeout(()=>{document.querySelector('#modal').value=m;document.querySelector('#modal').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#aspect-ration').value=a;document.querySelector('#aspect-ration').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#fn__include_textarea').value=t;document.querySelector('#fn__include_textarea').dispatchEvent(new Event('input',{bubbles:true}));},500);
+                setTimeout(()=>{document.querySelector('#modal').value=m;document.querySelector('#modal').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#aspect-ration').value=a;document.querySelector('#aspect-ration').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#fn__include_textarea').value=t;document.querySelector('#fn__include_textarea').dispatchEvent(new Event('input',{bubbles:true}));""" + quality_js + """},500);
             }""", [model, aspect, prompt])
             time.sleep(1.5)
 
@@ -608,7 +613,7 @@ def api_generate():
     if len(prompt) < 15: return jsonify({'error': 'prompt must be 15+ chars'}), 400
 
     generator = data.get('generator', 'grok')
-    if generator not in URLS: return jsonify({'error': f'Invalid generator: {generator}. Use grok or seedance'}), 400
+    if generator not in URLS: return jsonify({'error': f'Invalid generator: {generator}. Use grok, veo, or seedance'}), 400
 
     model = data.get('model', '3.1')
     # Validate model for generator

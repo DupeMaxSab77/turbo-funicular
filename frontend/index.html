@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video Generator</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;display:flex;justify-content:center;padding:20px}
+.container{max-width:600px;width:100%}
+h1{font-size:1.5rem;margin-bottom:8px;color:#fff}
+.subtitle{color:#888;margin-bottom:24px;font-size:.9rem}
+.field{margin-bottom:16px}
+label{display:block;font-size:.75rem;text-transform:uppercase;letter-spacing:1px;color:#888;margin-bottom:6px}
+select,input,textarea{width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #333;border-radius:8px;color:#fff;font-size:.95rem;outline:none;transition:border .2s}
+select:focus,input:focus,textarea:focus{border-color:#5ea20f}
+textarea{resize:vertical;min-height:80px}
+.row{display:flex;gap:12px}
+.row .field{flex:1}
+button{width:100%;padding:12px;background:#5ea20f;color:#fff;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;transition:background .2s}
+button:hover{background:#70c90a}
+button:disabled{background:#333;color:#666;cursor:not-allowed}
+.status{margin-top:20px;padding:16px;background:#1a1a1a;border-radius:8px;border:1px solid #333}
+.status h3{font-size:.85rem;color:#888;margin-bottom:8px;text-transform:uppercase;letter-spacing:1px}
+.job{margin-bottom:12px;padding:12px;background:#111;border-radius:6px;border-left:3px solid #333}
+.job.processing{border-left-color:#f0ad4e}
+.job.completed{border-left-color:#5ea20f}
+.job.failed{border-left-color:#d9534f}
+.job.queued{border-left-color:#5bc0de}
+.job-id{font-size:.8rem;color:#666;margin-bottom:4px}
+.job-status{font-weight:600;margin-bottom:4px}
+.job-progress{font-size:.85rem;color:#888}
+.job-url{margin-top:8px}
+.job-url a{color:#5ea20f;text-decoration:none;font-size:.85rem}
+.job-url a:hover{text-decoration:underline}
+.loading{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:#5ea20f;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{color:#666;text-align:center;padding:20px}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Video Generator</h1>
+<p class="subtitle">Generate AI videos with Grok, VEO and Seedance</p>
+
+<div class="field">
+<label>Prompt</label>
+<textarea id="prompt" placeholder="Describe your video... (min 15 chars)"></textarea>
+</div>
+
+<div class="row">
+<div class="field">
+<label>Generator</label>
+<select id="generator" onchange="updateModels()">
+<option value="grok">Grok</option>
+<option value="veo">VEO</option>
+<option value="seedance">Seedance</option>
+</select>
+</div>
+<div class="field">
+<label>Model</label>
+<select id="model"></select>
+</div>
+<div class="field">
+<label>Aspect</label>
+<select id="aspect">
+<option value="portrait">Portrait</option>
+<option value="landscape">Landscape</option>
+</select>
+</div>
+</div>
+
+<button id="btn" onclick="generate()">Generate</button>
+
+<div class="status" id="status" style="display:none">
+<h3>Jobs</h3>
+<div id="jobs"></div>
+</div>
+</div>
+
+<script>
+const API = 'https://turbo-funicular.fly.dev';
+const MODELS = {
+  grok: [{v:'3.1',t:'Grok 4'},{v:'2.0',t:'Grok 4.5'}],
+  veo: [{v:'3.1',t:'Google VEO 3.1'},{v:'2.0',t:'Google VEO 2.0'}],
+  seedance: [{v:'2.0',t:'Seedance 2.0'},{v:'1.5',t:'Seedance'}]
+};
+let polling = null;
+
+function updateModels(){
+  const gen = document.getElementById('generator').value;
+  const sel = document.getElementById('model');
+  sel.innerHTML = MODELS[gen].map(m=>`<option value="${m.v}">${m.t}</option>`).join('');
+}
+
+async function generate(){
+  const btn = document.getElementById('btn');
+  const prompt = document.getElementById('prompt').value.trim();
+  if(prompt.length < 15){alert('Prompt must be 15+ chars');return}
+
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+
+  try{
+    const res = await fetch(API+'/api/generate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        prompt,
+        generator: document.getElementById('generator').value,
+        model: document.getElementById('model').value,
+        aspect: document.getElementById('aspect').value
+      })
+    });
+    const data = await res.json();
+    if(data.error){alert(data.error);btn.disabled=false;btn.textContent='Generate';return}
+    startPolling();
+  }catch(e){
+    alert('Error: '+e.message);
+  }
+  btn.disabled=false;
+  btn.textContent='Generate';
+}
+
+function startPolling(){
+  if(polling) return;
+  document.getElementById('status').style.display='block';
+  poll();
+  polling = setInterval(poll, 3000);
+}
+
+async function poll(){
+  try{
+    const res = await fetch(API+'/api/jobs');
+    const data = await res.json();
+    renderJobs(data.jobs||[]);
+    const active = (data.jobs||[]).some(j=>j.status==='queued'||j.status==='processing');
+    if(!active && data.jobs&&data.jobs.length){
+      clearInterval(polling);
+      polling=null;
+    }
+  }catch(e){}
+}
+
+function renderJobs(jobs){
+  const el = document.getElementById('jobs');
+  if(!jobs.length){el.innerHTML='<div class="empty">No jobs yet</div>';return}
+  el.innerHTML = jobs.map(j=>{
+    const cls = j.status;
+    const icon = j.status==='processing'?'<span class="loading"></span>':'';
+    const url = j.videoUrl?`<div class="job-url"><a href="${j.videoUrl}" target="_blank">Download Video</a></div>`:'';
+    const err = j.error?`<div style="color:#d9534f;font-size:.85rem;margin-top:4px">${j.error}</div>`:'';
+    return `<div class="job ${cls}">
+      <div class="job-id">${j.id} | ${j.generator||'grok'} | ${j.model}</div>
+      <div class="job-status">${icon}${j.status}</div>
+      <div class="job-progress">${j.progress||''}</div>
+      ${url}${err}
+    </div>`;
+  }).join('');
+}
+
+updateModels();
+</script>
+</body>
+</html>
