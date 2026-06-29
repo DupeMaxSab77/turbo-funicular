@@ -504,9 +504,7 @@ def run_job(job_id, prompt, model, aspect, generator="grok"):
                 err = result.get('error', '?')
                 print(f"[Job] {job_id} attempt {attempt} failed: {err}", flush=True)
 
-                # If rate limited, stop retrying (no point)
-                if 'rate limit' in err.lower():
-                    break
+                # If rate limited, keep trying other proxies (different IPs)
 
             # All failed
             final_error = result.get('error', 'All attempts failed') if result else 'All attempts failed'
