@@ -65,6 +65,8 @@ AD_VIDEO_DOMAINS = [
     "rubiconproject.com", "casalemedia.com", "pubmatic.com", "openx.net",
     "serving-sys.com", "bidswitch.net", "sharethrough.com", "spotxchange.com",
     "yieldmo.com", "teads.tv", "connatix.com", "jidraider.com",
+    "2mdn.net", "googlevideo.com", "youtube.com/videoplayback",
+    "googleads.g.doubleclick.net",
 ]
 
 def is_ad_video_url(url):
