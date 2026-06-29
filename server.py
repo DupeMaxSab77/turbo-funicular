@@ -394,6 +394,13 @@ def generate_video(prompt, model="3.1", aspect="VIDEO_ASPECT_RATIO_PORTRAIT", pr
                         last_change = time.time()
                         print(f"[gen] Progress: {pi}%", flush=True)
                         if pi >= 100 and not p100: p100 = time.time()
+                    elif e % 10 == 0:
+                        # Debug: dump page state every 10s
+                        try:
+                            debug_el = pg.evaluate("()=>{const el=document.querySelector('.show-percentage');return el?el.textContent:'NO-ELEMENT'}")
+                            debug_btns = pg.evaluate("()=>document.querySelectorAll('button,[id*=generat]').length")
+                            print(f"[gen] Debug t={e}s progress_raw='{debug_el}' btns={debug_btns} vid={vid[0]}", flush=True)
+                        except: pass
                 except: pass
                 # After 100%, check for video more aggressively
                 if (p100 or (last_p >= 100)) and e % 2 == 0:
